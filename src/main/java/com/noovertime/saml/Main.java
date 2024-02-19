@@ -1,15 +1,14 @@
 package com.noovertime.saml;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.FileReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.PublicKey;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.zip.Inflater;
@@ -27,6 +26,8 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 public class Main {
@@ -44,14 +45,22 @@ public class Main {
 
 
         // base64 decoding & inflate
+        String xmlStr;
         byte[] base64DecodedBytes = Base64.getMimeDecoder().decode(originBytes);
-        byte[] inflatedData = new byte[5 * 1024]; // 5K
-        Inflater inflater = new Inflater(true);
-        inflater.setInput(base64DecodedBytes);
-        int inflatedBytesLength = inflater.inflate(inflatedData);
-        inflater.end();
-        // XML 문자열 생성
-        final String xmlStr = new String(inflatedData, 0, inflatedBytesLength);
+
+        try {
+            byte[] inflatedData = new byte[5 * 1024]; // 5K
+            Inflater inflater = new Inflater(true);
+            inflater.setInput(base64DecodedBytes);
+            int inflatedBytesLength = inflater.inflate(inflatedData);
+            inflater.end();
+            // XML 문자열로 변환
+            xmlStr = new String(inflatedData, 0, inflatedBytesLength);
+        }
+        catch(Exception ex) {
+            // inflate 실패는 inflate 없이 base64인코딩된 것으로 처리
+            xmlStr = new String(base64DecodedBytes);
+        }
 
         // signature 검증
         if(!checkSignagure(xmlStr)) {
@@ -79,6 +88,15 @@ public class Main {
         // sha1을 허용하기 위해 secure validation 기능 끔
         valContext.setProperty("org.jcp.xml.dsig.secureValidation", Boolean.FALSE);
 
+        // ID 참조가 포함된 문서를 위한 ID 정리
+        List<Node> idNodeList = new ArrayList<>();
+        findElementsWithID(idNodeList, doc.getDocumentElement());
+        if(!idNodeList.isEmpty()) {
+            for(Node node : idNodeList) {
+                valContext.setIdAttributeNS( (Element) node, null, "ID");
+            }
+        }
+
         // Unmarshal the XMLSignature
         XMLSignatureFactory fac = XMLSignatureFactory.getInstance("DOM");
         XMLSignature signature = fac.unmarshalXMLSignature(valContext);
@@ -86,6 +104,25 @@ public class Main {
         // signature 검증결과 반환
         return signature.validate(valContext);
     }
+
+    private static void findElementsWithID(List sumNodeList, Node node) {
+        NodeList childNodeList = node.getChildNodes();
+
+        for(int i = 0; i < childNodeList.getLength(); i++) {
+            Node child = childNodeList.item(i);
+            if(child.getNodeType() == Node.ELEMENT_NODE) {
+                NamedNodeMap attributes = child.getAttributes();
+                Node idAttribute = attributes.getNamedItem("ID");
+                if(idAttribute != null) {
+                    sumNodeList.add(child);
+                }
+
+                // 재귀
+                findElementsWithID(sumNodeList, child);
+            }
+        }
+    }
+
 
     private static void extract(String samlResXml) throws Exception {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -123,13 +160,10 @@ public class Main {
         }
     }
 
-
-
     private static String extractAuthnContextClassRef(Document doc) {
         Element authnContextClassRefElement = (Element) doc.getElementsByTagNameNS("urn:oasis:names:tc:SAML:2.0:assertion", "AuthnContextClassRef").item(0);
         return authnContextClassRefElement.getTextContent();
     }
-
 
     // Extract Issuer from the SAML Response
     private static String extractIssuer(Document doc) {
